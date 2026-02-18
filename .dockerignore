@@ -1,0 +1,27 @@
+# Dependencies (reinstalled in container)
+node_modules
+**/node_modules
+
+# Build outputs (we build inside Docker)
+keyNotesFrontend/dist
+**/dist
+
+# Git and IDE
+.git
+.gitignore
+.cursor
+.vscode
+*.md
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Optional: exclude backend data in image (mount as volume at runtime)
+# Backend/data

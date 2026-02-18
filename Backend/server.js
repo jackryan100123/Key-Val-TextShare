@@ -1,0 +1,367 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const cors = require('cors');
+const os = require('os');
+const multer = require('multer');
+const archiver = require('archiver');
+const mime = require('mime-types');
+
+const app = express();
+const PORT = 5000;
+
+// Increase request payload limits
+app.use(express.json({ limit: '1024mb' }));
+app.use(express.urlencoded({ limit: '1024mb', extended: true }));
+
+const DATA_DIR = path.join(__dirname, 'data');
+
+// Allowed origins
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://10.11.40.13',
+  'http://10.11.40.13:5173',
+  'http://192.168.255.1:5173',
+  'http://keynotes.cencops',
+  'http://10.11.40.13:80',
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`Blocked by CORS: ${origin}`);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+};
+
+// Middleware
+app.use(cors(corsOptions));
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Multer storage config - FIXED
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const keyDir = path.join(DATA_DIR, req.params.key);
+    if (!fs.existsSync(keyDir)) {
+      fs.mkdirSync(keyDir, { recursive: true });
+    }
+    cb(null, keyDir);
+  },
+  filename: (req, file, cb) => {
+    // Generate unique filename to avoid conflicts
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}-${uniqueSuffix}${ext}`);
+  },
+});
+
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 1024 * 1024 * 1024, // 1GB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Allow all file types for now
+    cb(null, true);
+  }
+});
+
+// GET text for a key
+app.get('/text/:key', (req, res) => {
+  const filePath = path.join(DATA_DIR, `${req.params.key}.txt`);
+  if (fs.existsSync(filePath)) {
+    try {
+      const text = fs.readFileSync(filePath, 'utf-8');
+      res.json({ text });
+    } catch (err) {
+      console.error('Error reading text file:', err);
+      res.status(500).json({ message: 'Error reading text file' });
+    }
+  } else {
+    res.status(404).json({ message: 'Text not found' });
+  }
+});
+
+// POST text for a key
+app.post('/text/:key', (req, res) => {
+  const { text } = req.body;
+  const filePath = path.join(DATA_DIR, `${req.params.key}.txt`);
+  try {
+    fs.writeFileSync(filePath, text, 'utf-8');
+    res.json({ message: 'Text saved successfully' });
+  } catch (err) {
+    console.error('Error saving text file:', err);
+    res.status(500).json({ message: 'Error saving text file' });
+  }
+});
+
+// DELETE text for a key
+app.delete('/text/:key', (req, res) => {
+  const filePath = path.join(DATA_DIR, `${req.params.key}.txt`);
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.unlinkSync(filePath);
+      res.json({ message: 'Text deleted successfully' });
+    } catch (err) {
+      console.error('Error deleting text file:', err);
+      res.status(500).json({ message: 'Error deleting text file' });
+    }
+  } else {
+    res.status(404).json({ message: 'Text file not found' });
+  }
+});
+
+// GET list of uploaded files for a key
+app.get('/file/:key', (req, res) => {
+  const keyDir = path.join(DATA_DIR, req.params.key);
+  const metaPath = path.join(keyDir, 'metadata.json');
+
+  if (!fs.existsSync(keyDir)) {
+    return res.json([]); // Return empty array instead of 404
+  }
+
+  let metadata = [];
+  if (fs.existsSync(metaPath)) {
+    try {
+      metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    } catch (err) {
+      console.error('Error reading metadata:', err);
+    }
+  } else {
+    // Build metadata dynamically if metadata.json is missing
+    const files = fs.readdirSync(keyDir).filter(f => f !== 'metadata.json');
+    metadata = files.map((name) => {
+      const fullPath = path.join(keyDir, name);
+      const stat = fs.statSync(fullPath);
+      return {
+        name: name, // This is the stored filename
+        originalName: name, // For display purposes
+        path: name,
+        type: mime.lookup(fullPath) || 'application/octet-stream',
+        size: stat.size,
+      };
+    });
+    if (metadata.length > 0) {
+      fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    }
+  }
+
+  res.json(metadata);
+});
+
+// POST upload multiple files for a key - FIXED
+app.post('/file/:key', upload.array('files'), (req, res) => {
+  console.log('Upload request received for key:', req.params.key);
+  console.log('Files received:', req.files?.length || 0);
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ message: 'No files uploaded' });
+  }
+
+  const keyDir = path.join(DATA_DIR, req.params.key);
+  const metaPath = path.join(keyDir, 'metadata.json');
+
+  // Read existing metadata or create empty
+  let metadata = [];
+  if (fs.existsSync(metaPath)) {
+    try {
+      metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    } catch (err) {
+      console.error('Failed to read metadata:', err);
+    }
+  }
+
+  // Add new files info
+  const newFiles = req.files.map(file => ({
+    name: file.filename, // This is the stored filename
+    originalName: file.originalname, // This is the original filename for display
+    path: file.filename,
+    type: file.mimetype || 'application/octet-stream',
+    size: file.size,
+  }));
+
+  metadata.push(...newFiles);
+
+  // Save updated metadata
+  try {
+    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    console.log('Files uploaded successfully:', newFiles.map(f => f.originalName));
+    res.json({ message: 'Files uploaded successfully', files: metadata });
+  } catch (err) {
+    console.error('Error saving metadata:', err);
+    res.status(500).json({ message: 'Error saving file metadata' });
+  }
+});
+
+// DELETE specific file
+app.delete('/file/:key/:filename', (req, res) => {
+  const key = req.params.key;
+  const filename = req.params.filename;
+  const keyDir = path.join(DATA_DIR, key);
+  const filePath = path.join(keyDir, filename);
+  const metaPath = path.join(keyDir, 'metadata.json');
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ message: 'File not found' });
+  }
+
+  try {
+    // Delete file
+    fs.unlinkSync(filePath);
+
+    // Update metadata.json
+    if (fs.existsSync(metaPath)) {
+      const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      const updatedMetadata = metadata.filter(item => item.path !== filename);
+      fs.writeFileSync(metaPath, JSON.stringify(updatedMetadata, null, 2), 'utf-8');
+    }
+
+    res.json({ message: 'File deleted successfully' });
+  } catch (err) {
+    console.error('Error deleting file:', err);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+// GET download all files as zip
+// GET download all files as zip
+app.get('/data/:key', (req, res) => {
+  const keyDir = path.join(DATA_DIR, req.params.key);
+  const metaPath = path.join(keyDir, 'metadata.json');
+
+  if (!fs.existsSync(keyDir)) {
+    return res.status(404).send('No data found for this key');
+  }
+
+  let metadata;
+  try {
+    metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  } catch (e) {
+    return res.status(500).send('Error reading metadata');
+  }
+
+  // Calculate total size for progress tracking
+  let totalSize = 0;
+  const validFiles = [];
+  
+  metadata.forEach(file => {
+    const filePath = path.join(keyDir, file.path);
+    if (fs.existsSync(filePath)) {
+      totalSize += file.size || 0;
+      validFiles.push(file);
+    }
+  });
+
+  // Set headers for secure download
+  res.setHeader('Content-Disposition', `attachment; filename="${req.params.key}.zip"`);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Security-Policy', 'default-src \'self\'');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  
+  // Add content length estimate (archiver compression ~30% reduction)
+  if (totalSize > 0) {
+    res.setHeader('Content-Length', Math.floor(totalSize * 0.7));
+  }
+
+  const archive = archiver('zip', {
+    zlib: { level: 1 } // Faster compression (less CPU intensive)
+  });
+
+  // Error handling for archiver
+  archive.on('error', (err) => {
+    console.error('Archive error:', err);
+    if (!res.headersSent) {
+      res.status(500).send('Error creating archive');
+    }
+  });
+
+  // Progress tracking
+  let processedSize = 0;
+  archive.on('progress', (progress) => {
+    processedSize = progress.entries.processed;
+    // You could emit progress via WebSocket if needed
+  });
+
+  archive.pipe(res);
+
+  // Add files to archive efficiently
+  validFiles.forEach(file => {
+    const filePath = path.join(keyDir, file.path);
+    try {
+      // Use original name for the zip file, ensure safe filename
+      const safeName = (file.originalName || file.name).replace(/[^a-zA-Z0-9.-_]/g, '_');
+      archive.file(filePath, { name: safeName });
+    } catch (err) {
+      console.error(`Error adding file ${file.name} to archive:`, err);
+    }
+  });
+
+  archive.finalize();
+});
+
+// GET download specific file
+app.get('/data/:key/:filename', (req, res) => {
+  const filePath = path.join(DATA_DIR, req.params.key, req.params.filename);
+  if (fs.existsSync(filePath)) {
+    // Get original filename from metadata if available
+    const metaPath = path.join(DATA_DIR, req.params.key, 'metadata.json');
+    let originalName = req.params.filename;
+    
+    if (fs.existsSync(metaPath)) {
+      try {
+        const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        const fileInfo = metadata.find(f => f.path === req.params.filename);
+        if (fileInfo && fileInfo.originalName) {
+          originalName = fileInfo.originalName;
+        }
+      } catch (err) {
+        console.error('Error reading metadata for download:', err);
+      }
+    }
+    
+    res.download(filePath, originalName);
+  } else {
+    res.status(404).send('File not found');
+  }
+});
+
+// Serve files statically (for preview purposes)
+app.use('/static', express.static(DATA_DIR));
+
+// Serve frontend static files (when running in Docker / production)
+const publicDir = path.join(__dirname, 'public');
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
+}
+
+// Helper to get local network IP address
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const ifaceList of Object.values(interfaces)) {
+    for (const iface of ifaceList) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
+// Start server on all interfaces
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running at:
+  - Local:   http://localhost:${PORT}
+  - Network: http://${getLocalIP()}:${PORT}`);
+});

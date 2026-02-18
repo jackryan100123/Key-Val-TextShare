@@ -1,0 +1,661 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Upload, Image, Music, Video, FileText, Save, DownloadCloud, Sparkles, Database, FileCode } from 'lucide-react';
+
+const API_URL = 'http://10.11.40.13:5000';
+
+interface FileData {
+  type: string;
+  name: string;
+  originalName?: string;
+  path: string;
+  size: number;
+  data?: string | ArrayBuffer | null;
+}
+
+const KeyValueForm: React.FC = () => {
+  const [key, setKey] = useState('');
+  const [text, setText] = useState('');
+  const [fileData, setFileData] = useState<FileData[] | null>(null);
+  const [message, setMessage] = useState('');
+  const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [zipDownloadProgress, setZipDownloadProgress] = useState<number>(0);
+  const [isDownloadingZip, setIsDownloadingZip] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [focusedElement, setFocusedElement] = useState<string | null>(null);
+  
+  const isKeyEntered = key.trim() !== '';
+
+  useEffect(() => {
+    if (!isKeyEntered) {
+      setFileData(null);
+      setText('');
+      setMessage('');
+      return;
+    }
+
+    async function fetchData() {
+      try {
+        const [fileRes, textRes] = await Promise.all([
+          fetch(`${API_URL}/file/${key}`),
+          fetch(`${API_URL}/text/${key}`),
+        ]);
+
+        const fileResult = fileRes.ok ? await fileRes.json() : [];
+        const textResult = textRes.ok ? await textRes.json() : null;
+
+        if (fileResult && fileResult.length > 0) {
+          setFileData(fileResult);
+          setMessage(`🎉 Loaded ${fileResult.length} file(s) for key: ${key}`);
+        } else {
+          setFileData([]);
+        }
+
+        if (textResult && textResult.text) {
+          setText(textResult.text);
+          setMessage((prev) => prev || `✨ Loaded text for key: ${key}`);
+        } else {
+          setText('');
+        }
+
+        if ((!fileResult || fileResult.length === 0) && (!textResult || !textResult.text)) {
+          setMessage('🔍 No data found for this key');
+        }
+      } catch (error) {
+        console.error('Error loading data:', error);
+        setMessage('❌ Error loading data');
+        setFileData([]);
+        setText('');
+      }
+    }
+
+    fetchData();
+  }, [key, isKeyEntered]);
+
+  useEffect(() => {
+    if (!isKeyEntered) return;
+
+    const handler = setTimeout(async () => {
+      try {
+        if (text.trim() === '') {
+          await fetch(`${API_URL}/text/${key}`, { method: 'DELETE' });
+          setMessage('🗑️ Text deleted');
+        } else {
+          const res = await fetch(`${API_URL}/text/${key}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+          });
+          setMessage(res.ok ? `💾 Saved text for key: ${key}` : '❌ Failed to save text');
+        }
+      } catch {
+        setMessage('❌ Failed to save text');
+      }
+    }, 800);
+
+    return () => clearTimeout(handler);
+  }, [text, key, isKeyEntered]);
+
+  const deleteFile = async (filename: string) => {
+    try {
+      const res = await fetch(`${API_URL}/file/${key}/${filename}`, { method: 'DELETE' });
+      if (res.ok) {
+        setFileData((prev) => prev?.filter((f) => f.path !== filename) || []);
+        setMessage(`🗑️ File deleted successfully`);
+      } else {
+        const errorData = await res.json().catch(() => ({}));
+        setMessage(`❌ Failed to delete file: ${errorData.message || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Error deleting file:', error);
+      setMessage(`❌ Error deleting file`);
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || !isKeyEntered || files.length === 0) return;
+
+    setIsUploading(true);
+    setUploadProgress(0);
+
+    const formData = new FormData();
+    for (let i = 0; i < files.length; i++) {
+      formData.append('files', files[i]);
+    }
+
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_URL}/file/${key}`, true);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percentComplete = Math.round((e.loaded / e.total) * 100);
+          setUploadProgress(percentComplete);
+        }
+      };
+
+      xhr.onload = () => {
+        setIsUploading(false);
+        setUploadProgress(0);
+        
+        if (xhr.status === 200) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            setFileData(data.files);
+            setMessage(`🎉 Successfully uploaded ${files.length} file(s)`);
+          } catch (e) {
+            console.error('Error parsing upload response:', e);
+            setMessage('⚠️ Upload completed but error parsing response');
+          }
+        } else {
+          try {
+            const errorData = JSON.parse(xhr.responseText);
+            setMessage(`❌ Failed to upload files: ${errorData.message || 'Unknown error'}`);
+          } catch (e) {
+            setMessage('❌ Failed to upload files');
+          }
+        }
+      };
+
+      xhr.onerror = () => {
+        setIsUploading(false);
+        setUploadProgress(0);
+        setMessage('🌐 Network error during file upload');
+      };
+
+      xhr.ontimeout = () => {
+        setIsUploading(false);
+        setUploadProgress(0);
+        setMessage('⏰ Upload timed out');
+      };
+
+      xhr.send(formData);
+    } catch (error) {
+      console.error('Upload error:', error);
+      setIsUploading(false);
+      setUploadProgress(0);
+      setMessage('❌ Failed to upload files');
+    }
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files.length > 0 && fileInputRef.current) {
+      fileInputRef.current.files = files;
+      const event = { target: { files } } as React.ChangeEvent<HTMLInputElement>;
+      handleFileUpload(event);
+    }
+  };
+
+  const handleDownloadAll = async () => {
+    if (!isKeyEntered || !fileData || fileData.length === 0) return;
+
+    setIsDownloadingZip(true);
+    setZipDownloadProgress(0);
+    setMessage('📦 Preparing ZIP download...');
+
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', `${API_URL}/data/${key}`, true);
+      xhr.responseType = 'blob';
+
+      xhr.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setZipDownloadProgress(percent);
+          setMessage(`⬇️ Downloading ZIP... ${percent}%`);
+        } else {
+          setMessage('⬇️ Downloading ZIP... Please wait');
+        }
+      };
+
+      xhr.onload = () => {
+        setIsDownloadingZip(false);
+        setZipDownloadProgress(0);
+        
+        if (xhr.status === 200) {
+          const blob = xhr.response;
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${key}.zip`;
+          
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+          
+          setMessage(`✅ Successfully downloaded ${fileData.length} files as ZIP`);
+        } else {
+          setMessage('❌ Failed to download ZIP file');
+        }
+      };
+
+      xhr.onerror = () => {
+        setIsDownloadingZip(false);
+        setZipDownloadProgress(0);
+        setMessage('🌐 Network error while downloading ZIP');
+      };
+
+      xhr.ontimeout = () => {
+        setIsDownloadingZip(false);
+        setZipDownloadProgress(0);
+        setMessage('⏰ ZIP download timed out');
+      };
+
+      xhr.timeout = 300000;
+      xhr.send();
+    } catch (error) {
+      console.error('ZIP download error:', error);
+      setIsDownloadingZip(false);
+      setZipDownloadProgress(0);
+      setMessage('❌ Error downloading ZIP file');
+    }
+  };
+
+  const handleFileDownload = async (filePath: string, fileName: string, originalName?: string) => {
+    const url = `${API_URL}/data/${key}/${filePath}`;
+    const displayName = originalName || fileName;
+    
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.responseType = 'blob';
+
+      xhr.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setDownloadProgress((prev) => ({ ...prev, [displayName]: percent }));
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          const urlBlob = window.URL.createObjectURL(xhr.response);
+          const a = document.createElement('a');
+          a.href = urlBlob;
+          a.download = displayName;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          window.URL.revokeObjectURL(urlBlob);
+          setDownloadProgress((prev) => {
+            const updated = { ...prev };
+            delete updated[displayName];
+            return updated;
+          });
+          setMessage(`📥 Downloaded ${displayName}`);
+        } else {
+          setMessage(`❌ Failed to download ${displayName}`);
+          setDownloadProgress((prev) => {
+            const updated = { ...prev };
+            delete updated[displayName];
+            return updated;
+          });
+        }
+      };
+
+      xhr.onerror = () => {
+        setMessage(`❌ Download error for ${displayName}`);
+        setDownloadProgress((prev) => {
+          const updated = { ...prev };
+          delete updated[displayName];
+          return updated;
+        });
+      };
+
+      xhr.open('GET', url);
+      xhr.send();
+    } catch (error) {
+      console.error('Download error:', error);
+      setMessage(`❌ Error downloading ${displayName}`);
+    }
+  };
+
+  const getFileIcon = (type: string) => {
+    const mimeType = type.split('/')[0];
+    switch (mimeType) {
+      case 'image':
+        return <Image className="w-6 h-6 text-pink-400" />;
+      case 'audio':
+        return <Music className="w-6 h-6 text-purple-400" />;
+      case 'video':
+        return <Video className="w-6 h-6 text-red-400" />;
+      default:
+        return <FileText className="w-6 h-6 text-blue-400" />;
+    }
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 p-4">
+      {/* Animated background elements */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-40 -right-40 w-80 h-80 rounded-full bg-gradient-to-r from-purple-400 to-pink-400 opacity-20 blur-3xl animate-pulse"></div>
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 rounded-full bg-gradient-to-r from-blue-400 to-cyan-400 opacity-20 blur-3xl animate-pulse delay-1000"></div>
+        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 h-96 rounded-full bg-gradient-to-r from-indigo-400 to-purple-400 opacity-10 blur-3xl animate-pulse delay-500"></div>
+      </div>
+
+      <div className="relative max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-12 relative">
+          <div className="inline-flex items-center gap-3 mb-4">
+            <div className="p-3 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 shadow-lg">
+              <Database className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-4xl font-bold bg-gradient-to-r from-white via-purple-200 to-pink-200 bg-clip-text text-transparent ">
+              Key Drop
+            </h1>
+            <Sparkles className="w-8 h-8 text-yellow-400 animate-pulse" />
+          </div>
+          <p className="text-xl text-gray-300  mx-auto">
+            Store, manage, and sync your data with style. Experience the future of data management.
+          </p>
+        </div>
+
+        {/* Main Content Card */}
+        <div className="backdrop-blur-xl bg-white/10 border border-white/20 rounded-3xl shadow-2xl p-8 space-y-8 relative overflow-hidden">
+          {/* Glass morphism overlay */}
+          <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent rounded-3xl"></div>
+          
+          <div className="relative z-10">
+            {/* Key Input */}
+            <div className="relative mb-8">
+              <label htmlFor="key" className="block text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                <FileCode className="w-5 h-5" />
+                Access Key
+              </label>
+              <div className="relative group">
+                <input
+                  type="text"
+                  id="key"
+                  value={key}
+                  onChange={(e) => setKey(e.target.value)}
+                  onFocus={() => setFocusedElement('key')}
+                  onBlur={() => setFocusedElement(null)}
+                  className="w-full px-6 py-4 bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl
+                           focus:ring-4 focus:ring-purple-500/50 focus:border-purple-400/50 text-white text-lg
+                           placeholder-gray-300 transition-all duration-300 group-hover:bg-white/15"
+                  placeholder="Enter your unique access key..."
+                  autoComplete="off"
+                />
+                {focusedElement === 'key' && (
+                  <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-purple-500/20 to-pink-500/20 animate-pulse pointer-events-none"></div>
+                )}
+              </div>
+            </div>
+
+            <div className={`transition-all duration-500 ${!isKeyEntered ? 'opacity-30 pointer-events-none blur-sm' : 'opacity-100'}`}>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+                
+                {/* Text Content Section */}
+                <div className="space-y-4">
+                  <label htmlFor="text" className="block text-lg font-semibold text-white flex items-center gap-2">
+                    <FileText className="w-5 h-5" />
+                    Text Content
+                    {isTyping && (
+                      <span className="inline-flex items-center gap-1 text-sm text-green-400">
+                        <div className="w-2 h-2 bg-green-400 rounded-full animate-ping"></div>
+                        Auto-saving...
+                      </span>
+                    )}
+                  </label>
+                  <div className="relative group">
+                    <textarea
+                      id="text"
+                      value={text}
+                      onChange={(e) => {
+                        setText(e.target.value);
+                        setIsTyping(true);
+                        setTimeout(() => setIsTyping(false), 1500);
+                      }}
+                      onFocus={() => setFocusedElement('text')}
+                      onBlur={() => setFocusedElement(null)}
+                      disabled={!isKeyEntered}
+                      className="w-full h-96 px-6 py-4 bg-white/10 backdrop-blur-md border border-white/20 rounded-2xl
+                               resize-none focus:ring-4 focus:ring-purple-500/50 focus:border-purple-400/50 text-white
+                               placeholder-gray-300 transition-all duration-300 group-hover:bg-white/15"
+                      placeholder="Start typing your content here... ✨"
+                    />
+                    {focusedElement === 'text' && (
+                      <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-blue-500/20 to-cyan-500/20 animate-pulse pointer-events-none"></div>
+                    )}
+                    <div className="absolute bottom-4 right-4 opacity-60">
+                      <Save className="w-5 h-5 text-white" />
+                    </div>
+                  </div>
+                </div>
+
+                {/* File Upload Section */}
+                <div className="space-y-4">
+                  <div className="flex justify-between items-center mb-4 ">
+                    <label className="block text-lg font-semibold text-white flex items-center gap-2 ">
+                      <Upload className="w-5 h-5" />
+                      File Attachments
+                      {fileData && fileData.length > 0 && (
+                        <span className="px-2 py-1 bg-purple-500/30 rounded-full text-sm font-medium ">
+                          {fileData.length}
+                        </span>
+                      )}
+                    </label>
+                    {fileData && fileData.length > 0 && (
+                      <div className="flex items-center gap-2 ">
+                        {isDownloadingZip ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
+                            <span className="text-sm text-green-400 font-medium">
+                              {zipDownloadProgress > 0 ? `${zipDownloadProgress}%` : 'Preparing...'}
+                            </span>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={handleDownloadAll}
+                            className="p-2 bg-gradient-to-r from-green-500 to-emerald-500 rounded-xl hover:from-green-600 hover:to-emerald-600 transition-all duration-300 transform hover:scale-110 shadow-lg"
+                            title="Download All as ZIP"
+                          >
+                            <DownloadCloud className="w-5 h-5 text-white" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* ZIP Download Progress */}
+                  {isDownloadingZip && zipDownloadProgress > 0 && (
+                    <div className="w-full h-3 bg-white/10 rounded-full overflow-hidden backdrop-blur-md">
+                      <div
+                        className="h-full bg-gradient-to-r from-green-400 to-emerald-500 rounded-full transition-all duration-300 relative"
+                        style={{ width: `${zipDownloadProgress}%` }}
+                      >
+                        <div className="absolute inset-0 bg-white/20 animate-pulse rounded-full"></div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Upload Progress */}
+                  {uploadProgress > 0 && isUploading && (
+                    <div className="w-full h-3 bg-white/10 rounded-full overflow-hidden backdrop-blur-md">
+                      <div
+                        className="h-full bg-gradient-to-r from-blue-400 to-purple-500 rounded-full transition-all duration-300 relative"
+                        style={{ width: `${uploadProgress}%` }}
+                      >
+                        <div className="absolute inset-0 bg-white/20 animate-pulse rounded-full"></div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Drop Zone */}
+                  <div 
+                    className={`relative border-2 border-dashed rounded-2xl p-6 transition-all duration-300 backdrop-blur-md h-96
+                              ${isDragging 
+                                ? 'border-purple-400 bg-purple-500/20 scale-105' 
+                                : 'border-white/30 bg-white/5 hover:bg-white/10 hover:border-white/50'
+                              }`}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      onChange={handleFileUpload}
+                      multiple
+                      className="hidden"
+                      disabled={!isKeyEntered || isUploading}
+                    />
+                    
+                    <div className="flex flex-col gap-6">
+                      {/* Upload Button */}
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={!isKeyEntered || isUploading}
+                        className="group relative flex items-center justify-center gap-3 px-8 py-4 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-semibold text-lg
+                                 hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed 
+                                 transform transition-all duration-300 hover:scale-105 shadow-lg hover:shadow-xl
+                                 disabled:transform-none disabled:hover:scale-100"
+                      >
+                        <Upload className={`w-6 h-6 transition-all duration-300 ${isUploading ? 'animate-bounce' : 'group-hover:scale-110'}`} />
+                        {!isKeyEntered ? '🔑 Enter a key first' : isUploading ? '⬆️ Uploading...' : '📁 Upload Files'}
+                        {!isUploading && (
+                          <div className="absolute inset-0 bg-white/20 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+                        )}
+                      </button>
+
+                      {/* File List */}
+                      {fileData && fileData.length > 0 && (
+                        <div className="space-y-3 max-h-96 overflow-y-auto pr-2 custom-scrollbar">
+                          {fileData.map((file, idx) => {
+                            const displayName = file.originalName || file.name;
+                            return (
+                              <div key={idx} className="group">
+                                <div className="flex items-center gap-4 p-4 bg-white/10 backdrop-blur-md rounded-xl 
+                                              border border-white/20 hover:bg-white/20 transition-all duration-300 transform hover:scale-[1.02]">
+                                  <div className="p-2 rounded-lg bg-gradient-to-br from-purple-500/20 to-pink-500/20">
+                                    {getFileIcon(file.type)}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-white font-medium truncate text-sm">
+                                      {displayName}
+                                    </div>
+                                    <div className="text-gray-300 text-xs">
+                                      {formatFileSize(file.size)}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    onClick={() => handleFileDownload(file.path, file.name, file.originalName)}
+                                    disabled={downloadProgress[displayName] !== undefined}
+                                    className="px-4 py-2 text-sm bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-lg
+                                             hover:from-blue-600 hover:to-cyan-600 disabled:opacity-50 transition-all duration-300
+                                             transform hover:scale-105 shadow-md"
+                                  >
+                                    {downloadProgress[displayName] !== undefined ? '⬇️' : '📥'}
+                                  </button>
+
+                                  <button
+                                    onClick={() => deleteFile(file.path)}
+                                    className="p-2 text-red-400 hover:text-red-300 hover:bg-red-500/20 rounded-lg transition-all duration-300 transform hover:scale-110"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+
+                                {/* Download progress bar */}
+                                {downloadProgress[displayName] !== undefined && downloadProgress[displayName] < 100 && (
+                                  <div className="mt-2 w-full h-2 bg-white/10 rounded-full overflow-hidden">
+                                    <div
+                                      className="h-2 bg-gradient-to-r from-green-400 to-emerald-500 transition-all duration-300"
+                                      style={{ width: `${downloadProgress[displayName]}%` }}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {fileData && fileData.length === 0 && (
+                        <div className="text-center text-gray-400 py-12">
+                          <Upload className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                          <p className="text-lg font-medium">No files uploaded yet</p>
+                          <p className="text-sm">Drag & drop files here or click to browse</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Status Message */}
+            {message && (
+              <div className="mt-8 relative">
+                <div className="backdrop-blur-md bg-gradient-to-r from-blue-500/20 to-purple-500/20 border border-white/30 
+                              text-white px-6 py-4 rounded-2xl shadow-lg animate-fade-in">
+                  <div className="flex items-center gap-3">
+                    <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
+                    <span className="font-medium">{message}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(255, 255, 255, 0.3);
+          border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(255, 255, 255, 0.5);
+        }
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
+      `}</style>
+    </div>
+  );
+};
+
+export default KeyValueForm;
